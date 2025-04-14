@@ -1,11 +1,11 @@
 ;;; tty-format.el --- text file backspacing and ANSI SGR as faces
 
-;; Copyright 2007, 2008 Kevin Ryde
+;; Copyright 2007, 2008, 2009, 2010, 2011, 2012, 2013, 2014, 2015, 2017, 2019 Kevin Ryde
 
-;; Author: Kevin Ryde <user42@zip.com.au>
-;; Version: 4
-;; Keywords: wp, faces
-;; URL: http://www.geocities.com/user42_kevin/tty-format/index.html
+;; Author: Kevin Ryde <user42_kevin@yahoo.com.au>
+;; Version: 12
+;; Keywords: wp, faces, ansi
+;; URL: http://user42.tuxfamily.org/tty-format/index.html
 ;; EmacsWiki: TtyFormat
 
 ;; tty-format.el is free software; you can redistribute it and/or modify it
@@ -19,7 +19,7 @@
 ;; Public License for more details.
 ;;
 ;; You can get a copy of the GNU General Public License online at
-;; <http://www.gnu.org/licenses>.
+;; <http://www.gnu.org/licenses/>.
 
 
 ;;; Commentary:
@@ -27,38 +27,66 @@
 ;; This is two additions to `format-alist' for decoding
 ;;
 ;;    * ANSI SGR escape sequences "Esc [ ... m" colours, bold, underline,
-;;      etc (through ansi-color.el).
+;;      etc through ansi-color.el.
 ;;
 ;;    * Backspace overstriking for bold, underline, overline, and a bullet
-;;      character "+ backspace o".
+;;      "+ backspace o".
 ;;
-;; Such sequences are tty or line printer oriented controls, but can be
+;; Such sequences are tty or line printer oriented output, but are sometimes
 ;; found in text files.  The aim is to make those files viewable and
 ;; hopefully have the attributes successfully copy into something like
 ;; `enriched-mode'.
 ;;
-;; There's no automatic detection of these formats, but see
-;; `tty-format-guess' below for an idea to notice text files using them.
+;; There's no automatic detection of these formats but you can "decode" a
+;; buffer containing them with
 ;;
-;; Groff produces output like this (via grotty), and some of its manuals use
-;; both ANSI and backspacing as do various other packages with text files
-;; produced from roff input.  You'd like to think the backspacing by now
-;; would be as dead as the line printers it was made for, but grotty still
-;; gets creative with it.
+;;     M-x format-decode-buffer backspace-overstrike
+;; and/or
+;;     M-x format-decode-buffer ansi-colors
 ;;
-;; Groff in fact has lots of character overstrike sequences to make ink
-;; resembling non-ascii characters.  There's far too many to want the code
-;; here to handle them all; you're much better off asking groff for extended
-;; charset output in the first place, instead of decoding bizarre
+;; `format-decode-buffer' has completion when it prompts for the format
+;; name.
+;;
+;; See `tty-format-guess' below for an idea to automatically notice text
+;; files using these formats.
+;;
+;; Groff produces output like this (via grotty), and some of its manuals
+;; have both ANSI and backspacing, as do various other packages with text
+;; files produced from roff input.  You might wonder that backspacing by now
+;; would have gone with the teletypes it was made for, but grotty still uses
+;; it in creative ways.
+;;
+;; Groff actually has lots of character overstrike sequences to make ink
+;; resembling non-ASCII characters.  There's far too many to want in the
+;; code here -- you're much better off asking groff for extended charset
+;; output in the first place (utf8 or whatever), instead of decoding bizarre
 ;; combinations after the fact.  So the aim here is only to handle bits
 ;; found in real life documents.  One moderately frequent bit not yet
 ;; supported is | plus = for a footnote dagger.
+;;
+;; Functions and variables here are named either "ansi-format-..." or
+;; "backspace-overstrike-...".  It seemed like a good idea at the time to
+;; have these two things in a single package (in particular since they can
+;; occur together).  Such multiple prefixing in a package is generally a bad
+;; idea, but in the interests of compatibility don't want to change it now.
+;;
+;; See also underline.el for a couple of simple functions adding or removing
+;; backspace underlining.
 
+;;; Emacsen:
+
+;; Designed for Emacs 21 up.
+;; Works in XEmacs 21 but maybe leaves buffer modified.
+;;
+;; Works in Emacs 20 if you have ansi-color.el.  The separately published
+;; ansi-color.el 3.4.5 works if you load cl.el for `mapc'.  But note in
+;; Emacs 20 faces don't display on a tty, only under X or similar GUI.
 
 ;;; Install:
 
 ;; To have M-x format-decode-buffer support the new formats put
-;; tty-format.el somewhere in your `load-path', and in your .emacs add
+;; tty-format.el in one of your `load-path' directories, and in your .emacs
+;; add
 ;;
 ;;     (require 'tty-format)
 ;;
@@ -66,8 +94,10 @@
 ;;
 ;;     (add-hook 'find-file-hooks 'tty-format-guess)
 ;;
-;; For just the formats it might work to add the format-alist entries and
-;; let their functions autoload, if you wanted to set that up.
+;; It's also possible to add the `format-alist' entries and then autoload
+;; the functions so the code loads only when used.  There's ;;;###autoload
+;; cookies doing this if you install via `M-x package-install' or know how
+;; to use `update-file-autoloads'.
 
 ;;; History:
 
@@ -75,59 +105,80 @@
 ;; Version 2 - call the format `ansi-colors' for clarity
 ;; Version 3 - add unicode U+203E overline
 ;; Version 4 - fix for re-matching multi-backspace sequences
-
+;; Version 5 - autoload the format-alist additions, not whole file
+;; Version 6 - autoload the encode too, for an unload-feature while in use
+;; Version 7 - decimal char bytes for emacs20
+;; Version 8 - use ansi-color-apply-face-function when available
+;; Version 9 - comments of explicit M-x format-decode-buffer
+;; Version 10 - new email
+;; Version 11 - compile-time decode-char for overline
+;; Version 12 - ansi-color.el no longer has an SGR regexp
 
 ;;; Code:
 
 (require 'ansi-color)
+(eval-when-compile
+  (unless (fboundp 'ignore-errors)
+    (require 'cl))) ;; for `ignore-errors'
 
-;;;###autoload (require 'tty-format)
+;;-----------------------------------------------------------------------------
+;; compatibility
+
+;; not in xemacs, quieten its byte compiler
+(defvar ansi-color-apply-face-function)
 
 
-;; As of Emacs 22 there's no builtin `overline' face, unlike say `bold' or
+;;-----------------------------------------------------------------------------
+;; faces
+
+;; As of Emacs 25, there's no builtin `overline' face, unlike say `bold' or
 ;; `underline', so define one here.  It comes out nicely on X but dunno what
 ;; sort of fallback would be good on a tty.  Usually overline is just groff
-;; trying to draw a box, so if it doesn't display it doesn't matter too
-;; much.
+;; trying to draw a box, so if it doesn't display then it doesn't matter much.
 ;;
 ;; XEmacs 21 doesn't support :overline in defface and will throw an error on
 ;; attempting it.  Known defface attributes are in 'custom-face-attributes',
 ;; which is pre-loaded in emacs but in xemacs21 must get it from
 ;; cus-face.el.  defface uses `custom-define-face' from cus-face.el anyway,
-;; so loading that package doesn't cost extra.
+;; so loading it doesn't drag in anything extra.
 ;;
-(unless (boundp 'custom-face-attributes) ;; not pre-loaded in xemacs21
-  (eval-and-compile (require 'cus-face)))
-(if (assoc :overline custom-face-attributes)
-    ;; emacs21 and emacs22
-    (defface tty-format-overline
-      '((t
-         (:overline t)))
-      "An overline face.
+(or (ignore-errors
+      ;; emacs21 and emacs22
+      (defface tty-format-overline
+        '((t
+           (:overline t)))
+        "An overline face.
 Used by buffer-format `backspace-overstrike' for overlining."
-      :group 'faces  ;; in absense of our own group
-      :link  '(url-link :tag "tty-format.el home page"
-                        "http://www.geocities.com/user42_kevin/tty-format/index.html"))
+        :group 'faces  ;; in absense of our own group
+        :link  '(url-link :tag "tty-format.el home page"
+                          "http://user42.tuxfamily.org/tty-format/index.html"))
+      t)
 
-  ;; xemacs21
-  (defface tty-format-overline
-    '((t))
-    "An overline face.
+    ;; xemacs21
+    (defface tty-format-overline
+      '((t))
+      "An overline face.
 Used by buffer-format `backspace-overstrike' for overlining.
 
-It seems your Emacs doesn't support :overline, so the default
+However, it seems your Emacs doesn't support :overline, so the default
 here is a is a do-nothing face."
-    :group 'faces ;; in absense of our own group
-    :link  '(url-link :tag "tty-format.el home page"
-                      "http://www.geocities.com/user42_kevin/tty-format/index.html")))
+      :group 'faces ;; in absense of our own group
+      :link  '(url-link :tag "tty-format.el home page"
+                        "http://user42.tuxfamily.org/tty-format/index.html")))
 
 (defun tty-format-add-faces (face-list beg end)
-  "Add FACE-LIST to the region between BEG and END.
-FACE-LIST is a list of faces.  If some parts of the region
-already have all of FACE-LIST then they're left unchanged.
+  "An internal part of tty-format.el.
+Add FACE-LIST to the region between BEG and END.
+FACE-LIST is a list of faces.  These faces are merged onto any
+existing `face' property by adding any of FACE-LIST not already
+there.  If no existing face property then FACE-LIST is stored as
+the face property value.
 
-Faces are compared with `equal', so face names accumulate by name
-even if some might come out looking the same on the screen."
+If it happens that some of the region already has all of
+FACE-LIST then those parts are not changed at all.
+
+Faces are compared with `equal' so face names accumulate by name
+even if some of them might look the same on screen."
 
   (when face-list
     (while (< beg end)
@@ -160,8 +211,14 @@ even if some might come out looking the same on the screen."
 
 
 ;;-----------------------------------------------------------------------------
-;; ansi sgr, via ansi-color.el
+;; ANSI sgr, via ansi-color.el
 
+(defconst tty-format-ansi-regexp "\033\\[\\([0-9;]*m\\)"
+  "An internal part of tty-format.el.
+This regexp matches ANSI colour (SGR) escape sequences Esc [ ... m.
+ansi-color.el used to have this as `ansi-color-regexp'.")
+
+;;;###autoload
 (add-to-list 'format-alist
              '(ansi-colors
                "ANSI SGR escape sequence colours and fonts."
@@ -171,16 +228,21 @@ even if some might come out looking the same on the screen."
                t
                nil))
 
+;;;###autoload
 (defun ansi-format-encode (beg end buffer)
+  ;; checkdoc-params: (beg end buffer)
   "Sorry, cannot encode `ansi-colors' format.
+This function is designed for use in `format-alist'.
+
 There's no support for re-encoding to save a file in
 `ansi-colors' format.  (But of course you can copy into another
 document with a format that does support saving.)"
   (error "Sorry, `ansi-colors' format is read-only"))
 
+;;;###autoload
 (defun ansi-format-decode (beg end)
   "Decode ANSI SGR control sequences between BEG and END into faces.
-This function is for use from `format-alist'.
+This function is designed for use in `format-alist'.
 
 ANSI standard \"Esc [ ... m\" terminal control sequences are
 turned into corresponding Emacs faces, using `ansi-colours'.
@@ -190,33 +252,42 @@ escape sequences could too easily occur in unrelated binary data.
 Decode files with an explicit \\[format-decode-buffer], or see
 `tty-format-guess' to try automated guessing on text files."
 
-  ;; This is like `ansi-color-apply-on-region', but using text properties
-  ;; instead of overlays; and it's like `ansi-color-apply', but operating on
-  ;; a buffer instead of a string.  Don't want to just put buffer-string
-  ;; through ansi-color-apply because that would lose marker positions, and
-  ;; also as of Emacs 22 ansi-color-apply is pretty slow on big input due to
-  ;; a lot of string copying.
-
-  (let ((buffer-read-only nil))  ;; if visiting a read-only file
+  (let ((inhibit-read-only t))  ;; if visiting a read-only file
     (save-excursion
       (save-restriction
         (narrow-to-region beg end)
 
-        (goto-char (point-min))
-        (let ((face-list nil)
-              (start     (point-min))
-              escape-sequence)
+        ;; ansi-color.el of emacs24.3 up has
+        ;; `ansi-color-apply-face-function' which can be used to apply faces
+        ;; as properties instead of the default overlays.
+        (if (eval-when-compile (boundp 'ansi-color-apply-face-function))
+            (let ((ansi-color-apply-face-function
+                   (lambda (beg end face)
+                     (tty-format-add-faces (list face) beg end))))
+              (setq ansi-color-context-region nil)
+              (ansi-color-apply-on-region (point-min) (point-max)))
 
-          (while (re-search-forward ansi-color-regexp nil t)
-            (setq escape-sequence (match-string 1))
-            (delete-region (match-beginning 0) (match-end 0))
-            (tty-format-add-faces face-list start (point))
-            (setq start (point))
-            (setq face-list
-                  (ansi-color-apply-sequence escape-sequence face-list)))
-
-          ;; remainder of buffer in final face
-          (tty-format-add-faces face-list start (point-max)))
+          ;; For previous ansi-color.el, this is like
+          ;; `ansi-color-apply-on-region', but using text properties instead
+          ;; of overlays.  And it's like `ansi-color-apply', but operating
+          ;; on a buffer instead of a string.  Don't want to just put
+          ;; `buffer-string' through `ansi-color-apply' because that would
+          ;; lose marker positions, and also as of Emacs 22
+          ;; `ansi-color-apply' is slow on big input due to a lot of string
+          ;; copying.
+          (goto-char (point-min))
+          (let ((face-list nil)
+                (start     (point-min))
+                escape-sequence)
+            (while (re-search-forward tty-format-ansi-regexp nil t)
+              (setq escape-sequence (match-string 1))
+              (delete-region (match-beginning 0) (match-end 0))
+              (tty-format-add-faces face-list start (point))
+              (setq start (point))
+              (setq face-list
+                    (ansi-color-apply-sequence escape-sequence face-list)))
+            ;; remainder of buffer in final face
+            (tty-format-add-faces face-list start (point-max))))
 
         (point-max)))))
 
@@ -224,6 +295,7 @@ Decode files with an explicit \\[format-decode-buffer], or see
 ;;-----------------------------------------------------------------------------
 ;; backspace overstrike
 
+;;;###autoload
 (add-to-list 'format-alist
              '(backspace-overstrike
                "Backspace overstriking for bold and underline."
@@ -233,27 +305,22 @@ Decode files with an explicit \\[format-decode-buffer], or see
                t
                nil))
 
+;;;###autoload
 (defun backspace-overstrike-encode (beg end buffer)
+  ;; checkdoc-params: (beg end buffer)
   "Sorry, cannot encode `backspace-overstrike' format.
+This function is designed for use in `format-alist'.
+
 There's no support for re-encoding to save a file in
 `backspace-overstrike' format.  (But of course you can copy into
 another document with a format that does support saving.)"
   (error "Sorry, `backspace-overstrike' format is read-only"))
 
-;; xemacs21 doesn't have utf-8 coding builtin (only if/when you load the
-;; mule-ucs package), so wait until decode below to generate an actual
-;; overline string
-;;
-(defconst tty-format-utf8-overline-bytes
-  (let ((str (string #xE2 #x80 #xBE)))
-    (if (eval-when-compile (fboundp 'string-make-unibyte))
-        (string-make-unibyte str) ;; emacs
-      str))                       ;; xemacs
-  "A unibyte string of utf-8 bytes for the U+203E overline character.")
-
+;;;###autoload
 (defun backspace-overstrike-decode (beg end)
   "Decode backspace overstrike sequences between BEG and END into faces.
-This function is for use from `format-alist'.
+This function is designed for use in `format-alist'.
+
 The sequences recognised are:
 
     X backspace X       -- bold
@@ -270,12 +337,25 @@ because backspace sequences could too easily occur in unrelated
 binary data.  Decode with an explicit \\[format-decode-buffer] or
 see `tty-format-guess' to try automated guessing on text files."
 
-  (let* ((buffer-read-only nil)   ;; if visiting a read-only file
+  (let* ((inhibit-read-only t)    ;; if visiting a read-only file
          (case-fold-search nil)   ;; don't match x\bX
-         ;; xemacs21 doesn't have `coding-system-p' so use `coding-system-list'
-         (overline  (and (member 'utf-8 (coding-system-list))
-                         (decode-coding-string tty-format-utf8-overline-bytes
-                                               'utf-8)))
+
+         ;; string of U+203E overline character
+         (overline (or (eval-when-compile
+                         (and (fboundp 'decode-char) ;; emacs21 up
+                              (string (decode-char 'ucs 8254))))
+                       (and (memq 'utf-8 (coding-system-list))
+                            ;; xemacs21 doesn't have `coding-system-p' so use
+                            ;; `coding-system-list', and it only has utf-8
+                            ;; anyway with mule-ucs
+                            (decode-coding-string
+                             (eval-when-compile
+                               (let ((str (string 226 128 190)))
+                                 (if (fboundp 'string-make-unibyte)
+                                     (string-make-unibyte str) ;; emacs
+                                   str)))                      ;; xemacs
+                             'utf-8))))
+
          (overline-regexp1 (and overline (concat overline "\b")))
          (overline-regexp2 (and overline (concat "[^\b]\\(\b[^\b_]\\)*?\\(\b"
                                                  overline "\\)")))
@@ -374,6 +454,7 @@ see `tty-format-guess' to try automated guessing on text files."
 ;;-----------------------------------------------------------------------------
 ;; text file guessing
 
+;;;###autoload
 (defun tty-format-guess ()
   "Decode text files containing ANSI SGR or backspace sequences.
 This is designed for use from `find-file-hook' (or
@@ -388,7 +469,14 @@ It'd be too dangerous to look at every file for escape and
 backspace sequences, they could too easily occur in binary data
 like an image file.  The idea of this function is to check just
 text files, presuming you're confident all \".txt\" files should
-indeed be ordinary text."
+be ordinary text.
+
+If you normally use this guess but found it didn't notice then
+remember the formats can always be decoded explicitly with
+
+    \\[format-decode-buffer] backspace-overstrike
+and/or
+    \\[format-decode-buffer] ansi-colors"
 
   (let ((filename (buffer-file-name)))
     (when filename
@@ -407,7 +495,7 @@ indeed be ordinary text."
 
         (if (save-excursion
               (goto-char (point-min))
-              (re-search-forward ansi-color-regexp nil t))
+              (re-search-forward tty-format-ansi-regexp nil t))
             (format-decode-buffer 'ansi-colors))))))
 
 ;; emacs  21 - find-file-hooks is a defvar
@@ -415,10 +503,14 @@ indeed be ordinary text."
 ;; emacs  22 - find-file-hooks becomes an alias for find-file-hook, and the
 ;;             latter is a defcustom, give custom-add-option on that
 ;;
+;;;###autoload
 (if (eval-when-compile (boundp 'find-file-hook))
     (custom-add-option 'find-file-hook 'tty-format-guess) ;; emacs22
   (custom-add-option 'find-file-hooks 'tty-format-guess)) ;; xemacs21
 
+
+;; LocalWords: Esc color overline overstrike overstriking groff Groff grotty
+;; LocalWords: roff el tty unicode txt viewable charset
 
 ;; Local variables:
 ;; coding: latin-1
